@@ -175,7 +175,8 @@ async function linkedMemberFor(adminId) {
 }
 // req.worker = a logged-in worker, or an admin acting through the member linked to their account.
 app.use('/api', async (req, res, next) => {
-  req.worker = req.session.worker || null;
+  // An admin session acts only through the member linked to that admin; a leftover worker login (e.g. HR's) must never win.
+  req.worker = req.session.admin ? null : (req.session.worker || null);
   if (!req.worker && req.session.admin && /^\/(worker\/(?!auth|ids)|attendance\/[^/]+\/manual)/.test(req.path)) {
     try { const m = await linkedMemberFor(req.session.admin.id); if (m) req.worker = { id: m.id, name: m.name, eid: m.eid, dept: m.dept }; } catch {}
   }
@@ -221,7 +222,7 @@ app.post('/api/admin/auth', async (req, res) => {
       if (!name || !email || password.length < 8) return res.status(400).json({ error: 'Name, recovery email and an 8+ character password are required' });
       const a = { id: id('admin'), username, name, email, pass_hash: await bcrypt.hash(password, 12), role: 'super', status: 'approved', created_at: new Date().toISOString() };
       const { error } = await db.from('admins').insert(a); if (error) throw error;
-      req.session.admin = publicAdmin(a); await logActivity('admin', a.id, 'super_admin_created');
+      delete req.session.worker; req.session.admin = publicAdmin(a); await logActivity('admin', a.id, 'super_admin_created');
       return res.json({ admin: req.session.admin });
     }
     if (mode === 'signup') {
@@ -234,7 +235,7 @@ app.post('/api/admin/auth', async (req, res) => {
     }
     if (!existing || !(await bcrypt.compare(password, existing.pass_hash))) return res.status(401).json({ error: 'Incorrect username or password' });
     if (existing.status !== 'approved') return res.status(403).json({ error: existing.status === 'pending' ? 'Account is awaiting approval' : 'Admin request was denied' });
-    req.session.admin = publicAdmin(existing); res.json({ admin: req.session.admin });
+    delete req.session.worker; req.session.admin = publicAdmin(existing); res.json({ admin: req.session.admin });
   } catch (e) { res.status(500).json({ error: errText(e) }); }
 });
 
@@ -406,6 +407,7 @@ app.post('/api/admin/sub-admins', requireSuper, async (req, res) => {
     if (await usernameTaken(username, null)) return res.status(400).json({ error: 'That username is already taken' });
     const a = { id: id('admin'), username, name, email, pass_hash: await bcrypt.hash(password, 12), role: 'admin', status: 'approved', created_at: new Date().toISOString() };
     const { error } = await db.from('admins').insert(a); if (error) throw error;
+    await setSetting(PERM_KEY + a.id, cleanPerms(Object.fromEntries(Object.keys(PERM_LABELS).map(k => [k, false])))); // nothing until the main admin ticks it
     await logActivity('admin', req.session.admin.id, 'sub_admin_added', null, { adminId: a.id, username });
     res.json({ admin: publicAdmin(a) });
   } catch (e) { res.status(500).json({ error: errText(e) }); }
@@ -562,6 +564,33 @@ app.get('/api/admin/main-access/log', requireMainAccess, async (req, res) => {
   } catch (e) { res.status(500).json({ error: errText(e) }); }
 });
 
+// Main admin access > sub admins and what each one may use (main admin only, after the password is entered)
+function requireSuperUnlocked(req, res, next) {
+  if (!req.session.admin || req.session.admin.role !== 'super') return res.status(403).json({ error: 'Main admin only' });
+  if (!req.session.mainAccessUntil || req.session.mainAccessUntil < Date.now()) return res.status(403).json({ error: 'Enter the main admin password', locked: true });
+  next();
+}
+app.get('/api/admin/main-access/sub-admins', requireSuperUnlocked, async (req, res) => {
+  try {
+    const { data, error } = await db.from('admins').select('*').eq('role', 'admin').eq('status', 'approved').order('created_at');
+    if (error) throw error;
+    const admins = [];
+    for (const a of data || []) admins.push({ ...publicAdmin(a), perms: await permsFor(a) });
+    res.json({ admins, labels: PERM_LABELS });
+  } catch (e) { res.status(500).json({ error: errText(e) }); }
+});
+app.put('/api/admin/main-access/sub-admins/:id', requireSuperUnlocked, async (req, res) => {
+  try {
+    const { data: t, error } = await db.from('admins').select('id,role,username').eq('id', req.params.id).maybeSingle();
+    if (error) throw error;
+    if (!t || t.role !== 'admin') return res.status(404).json({ error: 'Sub admin not found' });
+    const perms = cleanPerms(req.body.perms || {});
+    await setSetting(PERM_KEY + t.id, perms);
+    await logActivity('admin', req.session.admin.id, 'sub_admin_access_saved', null, { adminId: t.id, perms });
+    res.json({ perms });
+  } catch (e) { res.status(500).json({ error: errText(e) }); }
+});
+
 const workerLoginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, skipSuccessfulRequests: true, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many failed attempts. Please try again in 15 minutes.' } });
 app.post('/api/worker/auth', workerLoginLimiter, async (req, res) => {
   try {
@@ -571,7 +600,7 @@ app.post('/api/worker/auth', workerLoginLimiter, async (req, res) => {
     let m = null;
     for (const c of (data || []).filter(x => String(x.eid || '').trim().toLowerCase() === eid)) { if (await bcrypt.compare(pin, c.pin_hash)) { m = c; break; } }
     if (!m) return res.status(401).json({ error: 'Incorrect Worker ID or PIN' });
-    req.session.worker = { id: m.id, name: m.name, eid: m.eid, dept: m.dept }; res.json({ worker: req.session.worker });
+    delete req.session.admin; delete req.session.mainAccessUntil; req.session.worker = { id: m.id, name: m.name, eid: m.eid, dept: m.dept }; res.json({ worker: req.session.worker });
   } catch (e) { res.status(500).json({ error: errText(e) }); }
 });
 
@@ -691,6 +720,10 @@ app.post('/api/attendance/:id/manual', requireWorker, async (req, res) => {
     if (req.worker.id !== req.params.id) return res.status(403).json({ error: 'You can edit only your attendance' });
     const { type, date, time } = req.body;
     if (!['checkIn', 'checkOut'].includes(type) || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time)) return res.status(400).json({ error: 'Invalid date or time' });
+    // Optional daily log typed together with the manual entry. It is saved for that date and sent to the admin for approval.
+    const task = String(req.body.task || '').trim();
+    if (task && task.length < 3) return res.status(400).json({ error: 'Please describe your task (at least 3 characters)' });
+    if (task.length > 1000) return res.status(400).json({ error: 'Daily log is too long (max 1000 characters)' });
     const { data: m, error } = await db.from('members').select('*').eq('id', req.params.id).maybeSingle(); if (error) throw error;
     if (!m) return res.status(404).json({ error: 'Member not found' });
     if (await approvedLeaveOn(m.id, date)) return res.status(403).json({ error: ON_LEAVE_MSG });
@@ -700,11 +733,21 @@ app.post('/api/attendance/:id/manual', requireWorker, async (req, res) => {
     if (type === 'checkOut') {
       if (!existing?.check_in) return res.status(400).json({ error: 'Check in first. Check-out is allowed only after check-in for that date' });
       if (time <= existing.check_in) return res.status(400).json({ error: 'Check-out time must be after the check-in time' });
-      if (!(await hasLogFor(m.id, date))) return res.status(400).json({ error: LOG_FIRST_MSG });
+      if (!task && !(await hasLogFor(m.id, date))) return res.status(400).json({ error: LOG_FIRST_MSG });
     }
     if (type === 'checkIn' && existing?.check_out && time >= existing.check_out) return res.status(400).json({ error: 'Check-in time must be before the existing check-out time' });
-    await setAttendance(m.id, date, type, time);
-    await logActivity('worker', m.id, 'manual_attendance_edit', m.id, { type, date, time }); res.json({ ok: true });
+    // Save the daily log for this date (an already approved log is kept as it is).
+    let log = await getTodayLog(m.id, date);
+    if (task && log?.status !== 'approved') {
+      const { data, error: le } = await db.from('daily_logs').upsert({ member_id: m.id, date, task, status: 'pending', reviewed_by: null, reviewed_at: null, updated_at: new Date().toISOString() }, { onConflict: 'member_id,date' }).select('*').single();
+      if (le) throw le;
+      log = data;
+      await logActivity('worker', m.id, 'daily_log_submitted', m.id, { date, manual: true });
+    }
+    // Check-out through manual time is counted only after the admin approves the daily log (same as the normal check-out).
+    await setAttendance(m.id, date, type, time, type === 'checkOut' ? log?.status === 'approved' : undefined);
+    await logActivity('worker', m.id, 'manual_attendance_edit', m.id, { type, date, time });
+    res.json({ ok: true, log: publicLog(log), pendingApproval: !!log && log.status === 'pending' });
   } catch (e) { res.status(500).json({ error: errText(e) }); }
 });
 

@@ -285,6 +285,17 @@
   .modal-section{ border-top:1px solid var(--line); margin-top:20px; padding-top:16px; }
   .admin-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 0; border-top:1px solid var(--line); }
   .admin-row:first-of-type{ border-top:none; }
+  .adm-card{ padding:0 !important; margin-bottom:12px; overflow:hidden; }
+  .adm-head{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px 18px; cursor:pointer; user-select:none; }
+  .adm-head:hover{ background:var(--accent-bg); }
+  .adm-title{ font-weight:700; font-size:15px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .adm-role{ font-size:11.5px; font-weight:700; padding:3px 9px; border-radius:99px; background:var(--accent-bg); color:var(--accent); }
+  .adm-role.main{ background:var(--green-bg); color:var(--green); }
+  .adm-meta{ font-size:12.5px; color:var(--muted,#6b7280); margin-top:3px; line-height:1.5; }
+  .adm-chev{ font-size:18px; transition:transform .2s; color:var(--muted,#6b7280); }
+  .adm-card.open .adm-chev{ transform:rotate(90deg); }
+  .adm-body{ display:none; padding:0 18px 16px; border-top:1px solid var(--line); }
+  .adm-card.open .adm-body{ display:block; }
   .perm-list{ display:flex; flex-direction:column; gap:8px; margin:12px 0 4px; max-height:55vh; overflow:auto; }
   .perm-item{ display:flex; gap:10px; align-items:flex-start; padding:10px 12px; border:1px solid var(--line); border-radius:10px; font-size:13.5px; cursor:pointer; background:#fff; }
   .perm-item:has(input:checked){ border-color:var(--accent); background:var(--accent-bg); }
@@ -635,7 +646,7 @@
 
     <div id="view-mainaccess" style="display:none;">
       <div class="page-head">
-        <div><h1>Main admin access</h1><p>Password protected. Only the main admin can open this. Shows every member's check-in and check-out.</p></div>
+        <div><h1>Main admin access</h1><p>Password protected. Click an admin to see what access they have, choose what each sub admin can use, and see every member's check-in and check-out.</p></div>
       </div>
       <div id="mainAccessBox"></div>
     </div>
@@ -745,7 +756,7 @@ function enterAdminApp(){
   document.getElementById('mainAccessNavLink').classList.toggle('hidden',currentAdmin.role!=='super');mainUnlocked=false;myPerms={};myAccess=null;refreshMyAccess();
 
 
-  linkTargetId=null;showScreen('appRoot');renderAdmin();refreshLink();
+  currentWorker=null;linkData=null;linkTargetId=null;applyLinkNav();showScreen('appRoot');renderAdmin();refreshLink();
 }
 async function renderRequests(){
   renderAccessRequests();
@@ -788,14 +799,14 @@ async function handleWorkerSubmit(){
   try{const r=await api('/api/worker/auth',{method:'POST',body:JSON.stringify({eid:document.getElementById('workerEid').value.trim(),pin:document.getElementById('workerPin').value.trim()})});currentWorker=r.worker;await loadState();showScreen('workerAppScreen');await renderWorker('workerMain');}
   catch(e){err.textContent=e.message;err.classList.add('show');}
 }
-async function logout(){clearInterval(window._logPoll);try{await api('/api/logout',{method:'POST'});}catch{}currentAdmin=null;currentWorker=null;showScreen('landingScreen');}
+async function logout(){clearInterval(window._logPoll);try{await api('/api/logout',{method:'POST'});}catch{}currentAdmin=null;currentWorker=null;linkData=null;linkTargetId=null;applyLinkNav();showScreen('landingScreen');}
 
 async function addMember(name,eid,dept,pin){await api('/api/members',{method:'POST',body:JSON.stringify({name,eid,dept,pin})});await loadState();renderAdmin();}
 async function removeMember(id){try{await api('/api/members/'+id,{method:'DELETE'});await loadState();showToast('Member removed');renderAdmin();}catch(e){showToast(e.message);}}
 
 async function quickCheckIn(id){try{const u=(currentAdmin&&!currentWorker)?'/api/attendance/'+id+'/check-in':'/api/worker/check-in';await api(u,{method:'POST'});await loadState();showToast('Checked in');}catch(e){showToast(e.message);}}
 async function quickCheckOut(id,task){try{const adm=!!currentAdmin&&!currentWorker,u=adm?'/api/attendance/'+id+'/check-out':'/api/worker/check-out';const r=await api(u,{method:'POST',body:JSON.stringify(adm?{}:{task})});await loadState();showToast(!adm&&r&&r.pendingApproval?'Checked out — daily log is waiting for admin approval':'Checked out');}catch(e){showToast(e.message);}}
-async function manualEntry(id,type,dateStr,timeStr){try{await api('/api/attendance/'+id+'/manual',{method:'POST',body:JSON.stringify({type,date:dateStr,time:timeStr})});await loadState();showToast('Manual entry saved');return true;}catch(e){showToast(e.message);return false;}}
+async function manualEntry(id,type,dateStr,timeStr,task){try{const r=await api('/api/attendance/'+id+'/manual',{method:'POST',body:JSON.stringify({type,date:dateStr,time:timeStr,task:task||''})});await loadState();showToast(task&&r&&r.pendingApproval?'Manual entry saved — daily log sent to admin for approval':'Manual entry saved');return true;}catch(e){showToast(e.message);return false;}}
 
 let _swUnread=null;
 async function refreshSwNotif(){if(!currentAdmin)return;const card=document.getElementById('swNotifCard'),bd=document.getElementById('swBadge');try{const r=await api('/api/admin/site-work-notifications');const items=r.items||[],n=r.unreadCount||0;bd.textContent=n;bd.classList.toggle('hidden',n===0);if(_swUnread!==null&&n>_swUnread)showToast('New site work from a worker');_swUnread=n;if(!items.length){card.classList.add('hidden');return;}card.classList.remove('hidden');card.innerHTML=`<div class="manual-head"><div class="section-title">Site work notifications</div>${n?'<button class="btn btn-outline btn-sm" id="swReadAll">Mark all as read</button>':''}</div><div class="section-sub">Site work added by workers in the last 14 days.</div>${items.slice(0,8).map(x=>`<div class="admin-row" style="${x.unread?'background:var(--accent-bg);border-radius:8px;padding:6px 8px;':''}"><div><div class="m-name">${esc(x.name||'')} <span class="status-dot sitework" style="margin-left:6px"><span class="d"></span>Site work</span></div><div class="m-id">${esc(x.eid||'')} · ${fmtDay(x.date)}${x.note?' · '+esc(x.note):''}</div></div>${x.unread?'<span class="cal-tag" style="background:var(--accent);color:#fff">New</span>':''}</div>`).join('')}`;const b=document.getElementById('swReadAll');if(b)b.onclick=async()=>{try{await api('/api/admin/site-work-notifications/seen',{method:'POST'});_swUnread=0;await refreshSwNotif();}catch(e){showToast(e.message);}};}catch{}}
@@ -1187,7 +1198,7 @@ async function renderWorker(host){
   const outCard=`<div class="card worker-card" style="padding-top:18px"><div class="section-title">Step 3 — Check out</div><div class="section-sub">${outHint||'Daily log submitted. You can check out now.'}</div><div class="worker-actions"><button class="btn btn-outline btn-lg" id="wCheckOut" ${canOut?'':'disabled'}>Check out now</button></div></div>`;
   clearInterval(window._logPoll);
   if(logStatus==='pending')window._logPoll=setInterval(async()=>{try{const r=await api('/api/worker/daily-log');if(r.log?.status!=='pending'){clearInterval(window._logPoll);await renderWorker();showToast(r.log?.status==='approved'?'Your daily log was approved':'Your daily log was denied');}}catch{}},8000);
-  document.getElementById(workerHost).innerHTML=`<div class="card worker-card"><div class="worker-avatar-lg" style="background:${colorFor(m.id)}">${initials(m.name)}</div><div class="worker-name">${esc(m.name)}</div><div class="worker-role">${esc(m.dept)} · ${esc(m.eid)}</div><span class="status-dot ${st.key}"><span class="d"></span>${st.label}</span><div class="worker-metrics"><div class="worker-metric"><div class="worker-metric-label">Checked in</div><div class="worker-metric-value">${fmt12(rec.checkIn)}</div></div><div class="worker-metric"><div class="worker-metric-label">Checked out</div><div class="worker-metric-value">${fmt12(rec.checkOut)}</div></div></div><div class="worker-actions"><button class="btn btn-blue btn-lg" id="wCheckIn" ${rec.checkIn||onLeaveToday||markToday?'disabled':''}>Step 1 — Check in now</button></div>${lockHint}</div>${logCard}${outCard}${leaveCard}${siteCard}<div class="card manual-card"><div class="manual-head"><div class="section-title">Manual time entry</div></div><div class="manual-fields"><select id="manualType"><option value="checkIn">Check-in</option><option value="checkOut">Check-out</option></select><input type="date" id="manualDate" value="${todayStr}"><input type="time" id="manualTime" value="${nowHM()}"></div><button class="btn btn-blue" id="manualSubmit" style="width:100%">Save manual entry</button></div><div class="card activity-card"><div class="manual-head"><div class="section-title">Daily activity</div><button class="btn btn-outline btn-sm" id="workerDownloadBtn">Download report</button></div><div class="section-sub">Your check-in and check-out history.</div>${history.length?history.map(h=>`<div class="activity-row"><div class="activity-date">${esc(h.date)}</div><div class="activity-times"><span>In: ${fmt12(h.checkIn)}</span><span>Out: ${fmt12(h.checkOut)}</span>${h.counted===false?`<span style="color:var(--red);font-weight:600">${h.logStatus==='denied'?'Not approved':'Awaiting admin approval'}</span>`:''}</div></div>`).join(''):'<div class="empty">No activity recorded yet.</div>'}</div>`;
+  document.getElementById(workerHost).innerHTML=`<div class="card worker-card"><div class="worker-avatar-lg" style="background:${colorFor(m.id)}">${initials(m.name)}</div><div class="worker-name">${esc(m.name)}</div><div class="worker-role">${esc(m.dept)} · ${esc(m.eid)}</div><span class="status-dot ${st.key}"><span class="d"></span>${st.label}</span><div class="worker-metrics"><div class="worker-metric"><div class="worker-metric-label">Checked in</div><div class="worker-metric-value">${fmt12(rec.checkIn)}</div></div><div class="worker-metric"><div class="worker-metric-label">Checked out</div><div class="worker-metric-value">${fmt12(rec.checkOut)}</div></div></div><div class="worker-actions"><button class="btn btn-blue btn-lg" id="wCheckIn" ${rec.checkIn||onLeaveToday||markToday?'disabled':''}>Step 1 — Check in now</button></div>${lockHint}</div>${logCard}${outCard}${leaveCard}${siteCard}<div class="card manual-card"><div class="manual-head"><div class="section-title">Manual time entry</div></div><div class="manual-fields"><select id="manualType"><option value="checkIn">Check-in</option><option value="checkOut">Check-out</option></select><input type="date" id="manualDate" value="${todayStr}"><input type="time" id="manualTime" value="${nowHM()}"></div><div class="section-sub" style="margin:12px 0 6px">Daily log for this date — saved with the entry and sent to admin for approval. Required for check-out (unless it is already submitted).</div><textarea id="manualTask" maxlength="1000" placeholder="What did you work on?" style="width:100%;margin-bottom:10px"></textarea><button class="btn btn-blue" id="manualSubmit" style="width:100%">Save manual entry</button></div><div class="card activity-card"><div class="manual-head"><div class="section-title">Daily activity</div><button class="btn btn-outline btn-sm" id="workerDownloadBtn">Download report</button></div><div class="section-sub">Your check-in and check-out history.</div>${history.length?history.map(h=>`<div class="activity-row"><div class="activity-date">${esc(h.date)}</div><div class="activity-times"><span>In: ${fmt12(h.checkIn)}</span><span>Out: ${fmt12(h.checkOut)}</span>${h.counted===false?`<span style="color:var(--red);font-weight:600">${h.logStatus==='denied'?'Not approved':'Awaiting admin approval'}</span>`:''}</div></div>`).join(''):'<div class="empty">No activity recorded yet.</div>'}</div>`;
   document.getElementById('wCheckIn').onclick=async()=>{await quickCheckIn(m.id);await renderWorker();};document.getElementById('wCheckOut').onclick=async()=>{if(logStatus!=='pending'&&logStatus!=='approved'){showToast('Submit your daily log first, then check out');document.getElementById('logTask').focus();return;}await quickCheckOut(m.id);await renderWorker();};
   const lvKind=()=>document.querySelector('input[name="lvType"]:checked').value;document.querySelectorAll('input[name="lvType"]').forEach(r=>r.onchange=()=>{const em=lvKind()==='emergency',min=em?today0:tomorrow0,f=document.getElementById('lvFrom'),t=document.getElementById('lvTo');f.min=t.min=min;if(f.value<min)f.value=min;if(t.value<min)t.value=min;document.getElementById('lvHint').textContent=em?'Emergency leave is for urgent situations and can start today.':'Planned leave must be submitted at least one day before it starts.';});
   document.getElementById('lvSubmit').onclick=async()=>{const leaveType=lvKind(),fromDate=document.getElementById('lvFrom').value,toDate=document.getElementById('lvTo').value,reason=document.getElementById('lvReason').value.trim();if(!fromDate||!toDate){showToast('Choose the leave dates');return;}if(leaveType==='planned'&&fromDate<tomorrow0){showToast('Planned leave must be submitted at least one day before it starts');return;}if(toDate<fromDate){showToast('End date cannot be before start date');return;}if(reason.length<3){showToast('Please enter a reason');return;}try{await api('/api/worker/leaves',{method:'POST',body:JSON.stringify({fromDate,toDate,reason,leaveType})});showToast((leaveType==='emergency'?'Emergency':'Planned')+' leave request sent to admin');}catch(e){showToast(e.message);}await renderWorker();};
@@ -1195,7 +1206,7 @@ async function renderWorker(host){
   document.querySelectorAll('[data-swcancel]').forEach(b=>b.onclick=async()=>{try{await api('/api/worker/site-work/'+b.dataset.swcancel,{method:'DELETE'});await loadState();showToast('Site work cancelled');}catch(e){showToast(e.message);}await renderWorker();});
   document.querySelectorAll('[data-cancel]').forEach(b=>b.onclick=async()=>{try{await api('/api/worker/leaves/'+b.dataset.cancel,{method:'DELETE'});showToast('Leave request cancelled');}catch(e){showToast(e.message);}await renderWorker();});
   document.getElementById('logSubmit').onclick=async()=>{const task=document.getElementById('logTask').value.trim();if(task.length<3){showToast('Please describe your task');return;}try{await api('/api/worker/daily-log',{method:'POST',body:JSON.stringify({task})});showToast('Request sent to admin');}catch(e){showToast(e.message);}await renderWorker();};
-  document.getElementById('manualSubmit').onclick=async()=>{const ok=await manualEntry(m.id,document.getElementById('manualType').value,document.getElementById('manualDate').value,document.getElementById('manualTime').value);if(ok)await renderWorker();};
+  document.getElementById('manualSubmit').onclick=async()=>{const ok=await manualEntry(m.id,document.getElementById('manualType').value,document.getElementById('manualDate').value,document.getElementById('manualTime').value,document.getElementById('manualTask').value.trim());if(ok)await renderWorker();};
   document.getElementById('workerDownloadBtn').onclick=async()=>{try{const r=await api('/api/worker/history?days=365');const rows=(r.rows||[]).map(uc);const[,tot]=totalsRow('',1,rows);downloadCSV((m.name.replace(/\s+/g,'-'))+'-report.csv',[['Date','Check in','Check out','Hours Worked','Regular Hours (max 9)','OT Hours (over 9)','Daily Log Task','Daily Log Status'],...rows.map(x=>[x.date,fmt12(x.checkIn),fmt12(x.checkOut),...hoursCols(x.checkIn,x.checkOut),x.task||'',logLabel(x.logStatus)]),['TOTAL','','',...tot,'','']]);showToast('Report downloaded');}catch(e){showToast(e.message);}};
 }
 
@@ -1215,12 +1226,44 @@ function renderMainAccess(){
     document.getElementById('maPass').focus();return;
   }
   const t=ymd(new Date()),w=ymd(new Date(Date.now()-6*86400000));
-  box.innerHTML=`<div class="card list-card"><div class="att-tools"><label style="font-size:13px">From <input type="date" id="maFrom" value="${w}"></label><label style="font-size:13px">To <input type="date" id="maTo" value="${t}"></label><input type="text" id="maSearch" placeholder="Search member…"><button class="btn btn-outline btn-sm" id="maRefresh">Refresh</button><button class="btn btn-outline btn-sm" id="maCsv">Export CSV</button>${isSub?'':'<button class="btn btn-outline btn-sm" id="maLock">Lock</button>'}</div><div style="overflow-x:auto"><table class="report-table" id="maTable"></table></div></div>`;
+  box.innerHTML=(isSub?'':'<div id="maSubBox"></div>')+`<div class="card list-card"><div class="att-tools"><label style="font-size:13px">From <input type="date" id="maFrom" value="${w}"></label><label style="font-size:13px">To <input type="date" id="maTo" value="${t}"></label><input type="text" id="maSearch" placeholder="Search member…"><button class="btn btn-outline btn-sm" id="maRefresh">Refresh</button><button class="btn btn-outline btn-sm" id="maCsv">Export CSV</button>${isSub?'':'<button class="btn btn-outline btn-sm" id="maLock">Lock</button>'}</div><div style="overflow-x:auto"><table class="report-table" id="maTable"></table></div></div>`;
   document.getElementById('maRefresh').onclick=loadMainLog;document.getElementById('maFrom').onchange=loadMainLog;document.getElementById('maTo').onchange=loadMainLog;
   document.getElementById('maSearch').oninput=drawMainLog;
   if(!isSub)document.getElementById('maLock').onclick=()=>{lockMain();renderMainAccess();};
   document.getElementById('maCsv').onclick=()=>{const q=maFiltered();downloadCSV('check-in-check-out.csv',[['Date','Name','Worker ID','Department','Check in','Check out','Hours worked','Approval'],...q.map(x=>[x.date,x.name,x.eid,x.dept,fmt12(x.checkIn),fmt12(x.checkOut),hoursCols(x.checkIn,x.checkOut)[0],x.counted?'Counted':'Waiting approval'])]);};
   loadMainLog();
+  if(!isSub)loadSubAdminAccess();
+}
+async function loadSubAdminAccess(){
+  const el=document.getElementById('maSubBox');if(!el)return;
+  const wasOpen=new Set([...el.querySelectorAll('.adm-card.open')].map(c=>c.dataset.sa));
+  if(!el.children.length)el.innerHTML='<div class="card" style="padding:16px 18px;margin-bottom:14px"><div class="empty">Loading admins…</div></div>';
+  let r;
+  try{r=await api('/api/admin/main-access/sub-admins');}
+  catch(e){if(/password/i.test(e.message)){mainUnlocked=false;renderMainAccess();}else el.innerHTML=`<div class="card" style="padding:16px 18px;margin-bottom:14px"><div class="empty">${esc(e.message)}</div></div>`;return;}
+  const L=r.labels||{},keys=Object.keys(L),me=currentAdmin||{};
+  /* Main admin card (full access, read-only) */
+  const mainCard=`<div class="card adm-card ${wasOpen.has('__main')?'open':''}" data-sa="__main">
+    <div class="adm-head" data-toggle="__main"><div><div class="adm-title">${esc(me.name||'Main Admin')} <span class="adm-role main">MAIN ADMIN</span></div>
+    <div class="adm-meta">Full Admin Access<br>Individual Login ID &amp; Password${me.username?' · @'+esc(me.username):''}</div></div><span class="adm-chev">›</span></div>
+    <div class="adm-body"><div class="section-sub" style="margin-top:12px">Main admin has full access to everything. This cannot be changed.</div>
+    <div class="perm-list" style="max-height:none">${keys.map(k=>`<div class="perm-item perm-ro"><input type="checkbox" disabled checked><span>${esc(L[k])}</span></div>`).join('')}</div></div></div>`;
+  /* Sub admin cards (click to open -> tick access -> Save) */
+  const subCards=(r.admins||[]).map(a=>{const n=keys.filter(k=>a.perms[k]).length;return `<div class="card adm-card ${wasOpen.has(a.id)?'open':''}" data-sa="${a.id}">
+    <div class="adm-head" data-toggle="${a.id}"><div><div class="adm-title">${esc(a.name)} <span class="adm-role">SUB ADMIN</span></div>
+    <div class="adm-meta">Individual Login · @${esc(a.username)}<br>${n} of ${keys.length} access given</div></div><span class="adm-chev">›</span></div>
+    <div class="adm-body"><div class="section-sub" style="margin-top:12px">Tick what ${esc(a.name)} may use, then press Save access.</div>
+    <div class="perm-list" style="max-height:none">${keys.map(k=>`<label class="perm-item"><input type="checkbox" data-perm="${k}" ${a.perms[k]?'checked':''}><span>${esc(L[k])}</span></label>`).join('')}</div>
+    <div style="margin-top:12px"><button class="btn btn-blue btn-sm" data-save="${a.id}">Save access</button></div></div></div>`;}).join('');
+  el.innerHTML=`<div class="section-title" style="padding:4px 2px 0">Admins and their access</div><div class="section-sub" style="padding:0 2px 10px">Click an admin to see what access they have.</div>`+mainCard+(subCards||'<div class="card" style="padding:16px 18px;margin-bottom:14px"><div class="empty">No sub admins yet. Add them in Settings (gear icon).</div></div>');
+  el.querySelectorAll('[data-toggle]').forEach(h=>h.onclick=()=>h.closest('.adm-card').classList.toggle('open'));
+  el.querySelectorAll('[data-save]').forEach(b=>b.onclick=async()=>{
+    const card=el.querySelector('.adm-card[data-sa="'+b.dataset.save+'"]'),perms={};
+    card.querySelectorAll('[data-perm]').forEach(c=>perms[c.dataset.perm]=c.checked);
+    b.disabled=true;
+    try{await api('/api/admin/main-access/sub-admins/'+encodeURIComponent(b.dataset.save),{method:'PUT',body:JSON.stringify({perms})});showToast('Access saved');await loadSubAdminAccess();}
+    catch(e){showToast(e.message);b.disabled=false;}
+  });
 }
 function maFiltered(){const q=(document.getElementById('maSearch')?.value||'').trim().toLowerCase();return maRows.filter(x=>!q||(x.name+' '+x.eid+' '+x.dept).toLowerCase().includes(q));}
 function drawMainLog(){
@@ -1264,6 +1307,7 @@ async function renderLinkMember(){
 }
 async function renderMyWorker(){
   const box=document.getElementById('myWorkerMain');
+  await refreshLink(); // always the member linked to the admin who is logged in now
   if(!(linkData&&linkData.linked)){box.innerHTML='<div class="card"><div class="empty">No member linked yet. Use "Link Admin Member" first.</div></div>';return;}
   currentWorker=linkData.linked;
   await loadState();
