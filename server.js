@@ -41,6 +41,7 @@ app.use(session({
   cookie: { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: 8 * 60 * 60 * 1000 }
 }));
 app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 300, standardHeaders: true, legacyHeaders: false }));
+
 const TZ_IST = 'Asia/Kolkata'; // always India time, even if the host (Render) runs in UTC
 const ymd = d => (d || new Date()).toLocaleDateString('en-CA', { timeZone: TZ_IST }); // YYYY-MM-DD in IST
 const nowHM = () => new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: TZ_IST });
@@ -431,14 +432,22 @@ const PERM_LABELS = {
   activity: 'Daily Activity',
   dailylog: 'Daily Log (approve / deny)',
   leave: 'Leave (approve / deny / remove)',
-  linkmember: 'Link Admin Member',
+  mainaccess: 'Main Admin Access (Attendance Log tab)',
   alldata: 'All data (Settings)',
   passwordaccess: 'Password access (change login username / password in Settings)'
 };
 // Before the main admin permits anything, a sub admin keeps the normal work screens; the protected ones are off.
-const PERM_DEFAULT = { attendance: true, checkinout: false, report: true, activity: true, dailylog: true, leave: true, linkmember: true, alldata: true, passwordaccess: false };
+const PERM_DEFAULT = { attendance: true, checkinout: false, report: true, activity: true, dailylog: true, leave: true, mainaccess: false, alldata: true, passwordaccess: false };
 const PERM_KEY = 'subPerms:', REQ_KEY = 'accessReq:';
-function cleanPerms(src) { const out = {}; for (const k of Object.keys(PERM_LABELS)) out[k] = src && typeof src === 'object' && k in src ? src[k] === true : PERM_DEFAULT[k]; return out; }
+function cleanPerms(src) {
+  const out = {};
+  for (const k of Object.keys(PERM_LABELS)) {
+    if (src && typeof src === 'object' && k in src) out[k] = src[k] === true;
+    else if (k === 'mainaccess' && src && typeof src === 'object' && src.checkinout === true) out[k] = true; // old saves: keep the access they already had
+    else out[k] = PERM_DEFAULT[k];
+  }
+  return out;
+}
 async function permsFor(admin) {
   if (!admin) return cleanPerms({});
   if (admin.role === 'super') { const all = {}; for (const k of Object.keys(PERM_LABELS)) all[k] = true; return all; }
@@ -525,8 +534,8 @@ const MAIN_ACCESS_MS = 10 * 60 * 1000;
 const mainAccessLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, skipSuccessfulRequests: true, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many wrong passwords. Try again in 15 minutes.' } });
 async function requireMainAccess(req, res, next) {
   if (!req.session.admin) return res.status(401).json({ error: 'Admin login required' });
-  if (req.session.admin.role !== 'super') { // sub admin: only when the main admin ticked "Check-in / Check-out" for them
-    try { if ((await permsFor(req.session.admin)).checkinout) return next(); } catch (e) { return res.status(500).json({ error: errText(e) }); }
+  if (req.session.admin.role !== 'super') { // sub admin: only when the main admin ticked "Main Admin Access" for them
+    try { if ((await permsFor(req.session.admin)).mainaccess) return next(); } catch (e) { return res.status(500).json({ error: errText(e) }); }
     return res.status(403).json({ error: 'Main admin access only' });
   }
   if (!req.session.mainAccessUntil || req.session.mainAccessUntil < Date.now()) return res.status(403).json({ error: 'Enter the main admin password', locked: true });
@@ -578,39 +587,59 @@ app.get('/api/worker/ids', async (req, res) => {
 });
 
 // Admin dashboard > Link admin member
-app.get('/api/admin/link-member', requireAdmin, requirePerm('linkmember'), async (req, res) => {
+// The MAIN admin picks which member belongs to which admin (self or either sub admin).
+// Sub admins cannot link themselves; they only read their own link so "My Worker Dashboard" can show.
+async function linkTarget(req, res) {
+  const targetId = req.session.admin.role === 'super' ? String(req.query.adminId || req.body?.adminId || req.session.admin.id) : req.session.admin.id;
+  const { data: t, error } = await db.from('admins').select('id,name,username,role,status').eq('id', targetId).maybeSingle();
+  if (error) throw error;
+  if (!t || t.status !== 'approved') { res.status(404).json({ error: 'Admin not found' }); return null; }
+  return t;
+}
+app.get('/api/admin/link-member', requireAdmin, async (req, res) => {
   try {
-    const [{ data: members, error }, linked, { data: links }] = await Promise.all([
+    const me = req.session.admin, isSuper = me.role === 'super';
+    const t = await linkTarget(req, res); if (!t) return;
+    const linked = await linkedMemberFor(t.id);
+    if (!isSuper) return res.json({ linked: linked ? publicMember(linked) : null, members: [], admins: [] });
+    const [{ data: members, error }, { data: links }, { data: admins, error: ae }] = await Promise.all([
       db.from('members').select('id,name,eid,dept').order('name'),
-      linkedMemberFor(req.session.admin.id),
-      db.from('settings').select('key,value').like('key', LINK_PREFIX + '%')
+      db.from('settings').select('key,value').like('key', LINK_PREFIX + '%'),
+      db.from('admins').select('id,name,username,role').eq('status', 'approved').order('created_at')
     ]);
-    if (error) throw error;
+    if (error) throw error; if (ae) throw ae;
     const takenBy = {}; (links || []).forEach(l => { takenBy[l.value] = l.key.slice(LINK_PREFIX.length); });
+    const memberById = {}; (members || []).forEach(m => { memberById[m.id] = m; });
+    const adminRows = (admins || []).map(a => { const lm = (links || []).find(l => l.key === LINK_PREFIX + a.id); const m = lm && memberById[lm.value]; return { id: a.id, name: a.name, username: a.username, role: a.role, isMe: a.id === me.id, linkedName: m ? m.name : null }; })
+      .sort((x, y) => (y.role === 'super') - (x.role === 'super'));
     res.json({
+      target: { id: t.id, name: t.name, username: t.username, role: t.role },
+      admins: adminRows,
       linked: linked ? publicMember(linked) : null,
-      members: (members || []).map(m => ({ ...publicMember(m), linkedToOther: !!takenBy[m.id] && takenBy[m.id] !== req.session.admin.id }))
+      members: (members || []).map(m => ({ ...publicMember(m), linkedToOther: !!takenBy[m.id] && takenBy[m.id] !== t.id }))
     });
   } catch (e) { res.status(500).json({ error: errText(e) }); }
 });
-app.post('/api/admin/link-member', requireAdmin, requirePerm('linkmember'), async (req, res) => {
+app.post('/api/admin/link-member', requireSuper, async (req, res) => {
   try {
+    const t = await linkTarget(req, res); if (!t) return;
     const memberId = String(req.body.memberId || '');
     const { data: m, error } = await db.from('members').select('id,name,eid,dept').eq('id', memberId).maybeSingle();
     if (error) throw error;
     if (!m) return res.status(404).json({ error: 'Member not found' });
     const { data: links } = await db.from('settings').select('key,value').like('key', LINK_PREFIX + '%');
-    if ((links || []).some(l => l.value === m.id && l.key !== LINK_PREFIX + req.session.admin.id)) return res.status(400).json({ error: 'This member is already linked to another admin' });
-    await setSetting(LINK_PREFIX + req.session.admin.id, m.id);
-    await logActivity('admin', req.session.admin.id, 'admin_linked_member', m.id);
+    if ((links || []).some(l => l.value === m.id && l.key !== LINK_PREFIX + t.id)) return res.status(400).json({ error: 'This member is already linked to another admin' });
+    await setSetting(LINK_PREFIX + t.id, m.id);
+    await logActivity('admin', req.session.admin.id, 'admin_linked_member', m.id, { adminId: t.id });
     res.json({ linked: publicMember(m) });
   } catch (e) { res.status(500).json({ error: errText(e) }); }
 });
-app.delete('/api/admin/link-member', requireAdmin, requirePerm('linkmember'), async (req, res) => {
+app.delete('/api/admin/link-member', requireSuper, async (req, res) => {
   try {
-    const { error } = await db.from('settings').delete().eq('key', LINK_PREFIX + req.session.admin.id);
+    const t = await linkTarget(req, res); if (!t) return;
+    const { error } = await db.from('settings').delete().eq('key', LINK_PREFIX + t.id);
     if (error) throw error;
-    await logActivity('admin', req.session.admin.id, 'admin_unlinked_member');
+    await logActivity('admin', req.session.admin.id, 'admin_unlinked_member', null, { adminId: t.id });
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: errText(e) }); }
 });

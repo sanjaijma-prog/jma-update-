@@ -1,3 +1,4 @@
+process.env.TZ = process.env.TZ || 'Asia/Kolkata'; // IST for every Date() call
 const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
@@ -41,8 +42,9 @@ app.use(session({
 }));
 app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 300, standardHeaders: true, legacyHeaders: false }));
 
-const ymd = d => (d || new Date()).toLocaleDateString('en-CA'); // YYYY-MM-DD in server time zone (TZ env)
-const nowHM = () => new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+const TZ_IST = 'Asia/Kolkata'; // always India time, even if the host (Render) runs in UTC
+const ymd = d => (d || new Date()).toLocaleDateString('en-CA', { timeZone: TZ_IST }); // YYYY-MM-DD in IST
+const nowHM = () => new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: TZ_IST });
 const id = prefix => `${prefix}_${crypto.randomUUID()}`;
 const errText = e => e?.message || 'Database operation failed';
 

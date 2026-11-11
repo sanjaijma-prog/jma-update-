@@ -620,7 +620,7 @@
 
     <div id="view-linkmember" style="display:none;">
       <div class="page-head">
-        <div><h1>Link admin member</h1><p>Select the member that is you. A "My Worker Dashboard" tab then appears in this admin dashboard so you can check in, check out, send your daily log and request leave.</p></div>
+        <div><h1>Link admin member</h1><p>Choose the admin (you or a sub admin), then select the member that belongs to that admin. A "My Worker Dashboard" tab then appears for that admin so they can check in, check out, send their daily log and request leave. Only the main admin can link members.</p></div>
         <div class="search-box"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input type="text" id="linkSearch" placeholder="Search members"></div>
       </div>
       <div id="linkCurrent"></div>
@@ -740,11 +740,12 @@ function enterAdminApp(){
   ['suConfirm','suName','suEmail'].forEach(id=>{const e=document.getElementById(id);if(e)e.value='';});
   document.getElementById('userChip').innerHTML=`<div class="u-avatar" style="background:${colorFor(currentAdmin.id)}">${initials(currentAdmin.name)}</div><span class="u-name">${esc(currentAdmin.name.split(' ')[0])}</span>`;
   document.getElementById('requestsNavLink').classList.toggle('hidden',currentAdmin.role!=='super');
+  {const lk=document.querySelector('.nav-link[data-view="linkmember"]');if(lk)lk.classList.toggle('hidden',currentAdmin.role!=='super');}
 
   document.getElementById('mainAccessNavLink').classList.toggle('hidden',currentAdmin.role!=='super');mainUnlocked=false;myPerms={};myAccess=null;refreshMyAccess();
 
 
-  showScreen('appRoot');renderAdmin();refreshLink();
+  linkTargetId=null;showScreen('appRoot');renderAdmin();refreshLink();
 }
 async function renderRequests(){
   renderAccessRequests();
@@ -845,13 +846,14 @@ function openEditMember(id){
 }
 
 /* ---------- Sub admin access (request -> permit -> checkboxes) ---------- */
-const NAV_PERM={report:'report',activity:'activity',attlog:'attendance',dailylog:'dailylog',leave:'leave',linkmember:'linkmember'};
+const NAV_PERM={report:'report',activity:'activity',attlog:'attendance',dailylog:'dailylog',leave:'leave'};
 function applyPerms(){
   const sub=currentAdmin&&currentAdmin.role!=='super';
   document.getElementById('myAccessNavLink').classList.toggle('hidden',!sub);
+  const lk=document.querySelector('.nav-link[data-view="linkmember"]');if(lk)lk.classList.toggle('hidden',!!sub);
   if(!sub)return;
   Object.entries(NAV_PERM).forEach(([v,k])=>{const b=document.querySelector('.nav-link[data-view="'+v+'"]');if(b)b.classList.toggle('hidden',!myPerms[k]);});
-  document.getElementById('mainAccessNavLink').classList.toggle('hidden',!myPerms.checkinout);
+  document.getElementById('mainAccessNavLink').classList.toggle('hidden',!myPerms.mainaccess);
 }
 async function refreshMyAccess(){
   if(!currentAdmin)return;
@@ -1205,7 +1207,7 @@ function lockMain(){if(!mainUnlocked)return;mainUnlocked=false;api('/api/admin/m
 function renderMainAccess(){
   const box=document.getElementById('mainAccessBox');
   const isSub=currentAdmin?.role!=='super';
-  if(isSub&&!myPerms.checkinout){box.innerHTML='<div class="card"><div class="empty">Only the main admin can open this. Use Request Access to ask for it.</div></div>';return;}
+  if(isSub&&!myPerms.mainaccess){box.innerHTML='<div class="card"><div class="empty">Only the main admin can open this. Use Request Access to ask for it.</div></div>';return;}
   if(!isSub&&!mainUnlocked){
     box.innerHTML=`<div class="card" style="max-width:420px;margin:30px auto;padding:26px"><div class="section-title">Enter main admin password</div><div class="section-sub">This area is only for the main admin. Sub admins cannot open it.</div><div class="auth-error" id="maErr"></div><div class="field"><label>Password</label><input type="password" id="maPass" autocomplete="current-password"></div><button class="btn btn-blue" id="maUnlock" style="width:100%">Open</button></div>`;
     const go=async()=>{const e=document.getElementById('maErr');e.classList.remove('show');try{await api('/api/admin/main-access',{method:'POST',body:JSON.stringify({password:document.getElementById('maPass').value})});mainUnlocked=true;renderMainAccess();}catch(x){e.textContent=x.message;e.classList.add('show');}};
@@ -1237,23 +1239,28 @@ async function loadMainLog(){
 let linkData=null;
 function applyLinkNav(){document.getElementById('myWorkerNavLink').classList.toggle('hidden',!(linkData&&linkData.linked));}
 async function refreshLink(){if(!currentAdmin)return;try{linkData=await api('/api/admin/link-member');}catch{linkData=null;}applyLinkNav();}
+let linkTargetId=null;
 async function renderLinkMember(){
   const list=document.getElementById('linkList'),cur=document.getElementById('linkCurrent');
   list.innerHTML='<div class="empty">Loading…</div>';
-  await refreshLink();
-  if(!linkData){list.innerHTML='<div class="empty">Could not load members. Try again.</div>';return;}
-  const q=(document.getElementById('linkSearch').value||'').trim().toLowerCase(),L=linkData.linked;
-
-  cur.innerHTML=L?`<div class="card" style="padding:14px 18px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap"><div><div class="section-sub" style="margin:0">Linked member</div><div class="m-name">${esc(L.name)} <span class="m-id" style="display:inline">· ${esc(L.eid)} · ${esc(L.dept)}</span></div></div><button class="btn btn-outline btn-sm" id="unlinkBtn">Remove</button></div>`:'';
-  const doUnlink=async()=>{try{await api('/api/admin/link-member',{method:'DELETE'});if(document.querySelector('.nav-link.active')?.dataset.view==='myworker')document.querySelector('.nav-link[data-view="linkmember"]').click();showToast('Member removed');await renderLinkMember();}catch(e){showToast(e.message);}};
+  let pd=null;
+  try{pd=await api('/api/admin/link-member'+(linkTargetId?'?adminId='+encodeURIComponent(linkTargetId):''));}catch(e){if(linkTargetId){linkTargetId=null;return renderLinkMember();}}
+  if(!pd||!pd.target){list.innerHTML='<div class="empty">Could not load members. Try again.</div>';return;}
+  linkTargetId=pd.target.id;
+  const own=pd.target.id===currentAdmin.id;
+  if(own){linkData={linked:pd.linked,members:pd.members};applyLinkNav();}
+  const q=(document.getElementById('linkSearch').value||'').trim().toLowerCase(),L=pd.linked;
+  const tabs=(pd.admins||[]).map(a=>`<button class="btn btn-sm ${a.id===pd.target.id?'btn-blue':'btn-outline'}" data-target="${a.id}">${esc(a.name)} <span style="opacity:.75;font-weight:400">(${a.role==='super'?'Main admin':'Sub admin'}${a.linkedName?' · '+esc(a.linkedName):' · not linked'})</span></button>`).join('');
+  cur.innerHTML=`<div class="card" style="padding:14px 18px;margin-bottom:14px"><div class="section-sub" style="margin:0 0 8px">Link a member for:</div><div style="display:flex;gap:8px;flex-wrap:wrap">${tabs}</div></div>`+
+    `<div class="card" style="padding:14px 18px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap"><div><div class="section-sub" style="margin:0">Linked member for ${esc(pd.target.name)}</div>${L?`<div class="m-name">${esc(L.name)} <span class="m-id" style="display:inline">· ${esc(L.eid)} · ${esc(L.dept)}</span></div>`:'<div class="m-name" style="font-weight:500">None selected</div>'}</div>${L?'<button class="btn btn-outline btn-sm" id="unlinkBtn">Remove</button>':''}</div>`;
+  cur.querySelectorAll('[data-target]').forEach(b=>b.onclick=()=>{linkTargetId=b.dataset.target;renderLinkMember();});
+  const tq=encodeURIComponent(pd.target.id);
+  const doUnlink=async()=>{try{await api('/api/admin/link-member?adminId='+tq,{method:'DELETE'});if(own&&document.querySelector('.nav-link.active')?.dataset.view==='myworker')document.querySelector('.nav-link[data-view="linkmember"]').click();showToast('Member removed');await renderLinkMember();}catch(e){showToast(e.message);}};
   if(L)document.getElementById('unlinkBtn').onclick=doUnlink;
-  const rows=linkData.members.filter(m=>!q||(m.name+' '+m.eid+' '+m.dept).toLowerCase().includes(q));
+  const rows=pd.members.filter(m=>!q||(m.name+' '+m.eid+' '+m.dept).toLowerCase().includes(q));
   list.innerHTML=rows.length?rows.map(m=>{const mine=L&&L.id===m.id;return `<div class="member-row" style="grid-template-columns:1.8fr 1fr auto"><div class="m-who"><div class="m-avatar" style="background:${colorFor(m.id)}">${initials(m.name)}</div><div><div class="m-name">${esc(m.name)}</div><div class="m-id">${esc(m.eid)}</div></div></div><div class="m-dept">${esc(m.dept)}</div><div class="m-actions">${mine?'<span class="status-dot done"><span class="d"></span>Linked</span>':m.linkedToOther?'<span class="m-dept">Linked to another admin</span>':''}<button class="btn btn-blue btn-sm" data-link="${m.id}" ${mine||m.linkedToOther?'disabled':''}>Select</button><button class="btn btn-outline btn-sm" ${mine?'data-unlink="1"':'disabled'} style="${mine?'color:var(--red)':''}">Remove</button></div></div>`;}).join(''):'<div class="empty">No members found.</div>';
   list.querySelectorAll('[data-unlink]').forEach(b=>b.onclick=doUnlink);
-
-  
-
-  list.querySelectorAll('[data-link]').forEach(b=>b.onclick=async()=>{try{await api('/api/admin/link-member',{method:'POST',body:JSON.stringify({memberId:b.dataset.link})});showToast('Linked. Open "My Worker Dashboard"');await renderLinkMember();}catch(e){showToast(e.message);}});
+  list.querySelectorAll('[data-link]').forEach(b=>b.onclick=async()=>{try{await api('/api/admin/link-member',{method:'POST',body:JSON.stringify({memberId:b.dataset.link,adminId:pd.target.id})});showToast('Linked to '+pd.target.name);await renderLinkMember();}catch(e){showToast(e.message);}});
 }
 async function renderMyWorker(){
   const box=document.getElementById('myWorkerMain');
