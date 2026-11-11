@@ -96,6 +96,13 @@ async function setAttendance(memberId, date, type, time, counted) {
   const { error } = await db.from('attendance').upsert(row, { onConflict: 'member_id,date' });
   if (error) throw error;
 }
+// Check-out is allowed only when today's daily log is entered (pending or approved). A denied / missing log blocks it.
+const LOG_FIRST_MSG = 'Enter your daily log first. Check-out is allowed only after the daily log is submitted';
+async function hasLogFor(memberId, date) {
+  const { data, error } = await db.from('daily_logs').select('status,task').eq('member_id', memberId).eq('date', date).maybeSingle();
+  if (error) throw error;
+  return !!data && ['pending', 'approved'].includes(data.status) && String(data.task || '').trim().length >= 3;
+}
 async function getTodayLog(memberId, date) {
   const { data, error } = await db.from('daily_logs').select('*').eq('member_id', memberId).eq('date', date).maybeSingle();
   if (error) throw error;
@@ -614,6 +621,7 @@ async function adminAttendance(req, res, type) {
     if (type === 'checkIn' && r?.check_in) return res.status(400).json({ error: 'Already checked in' });
     if (type === 'checkOut' && !r?.check_in) return res.status(400).json({ error: 'Check in first' });
     if (type === 'checkOut' && r?.check_out) return res.status(400).json({ error: 'Already checked out' });
+    if (type === 'checkOut' && !(await hasLogFor(req.params.id, date))) return res.status(400).json({ error: LOG_FIRST_MSG });
     if (type === 'checkIn') { try { await db.from('attendance_marks').delete().eq('member_id', req.params.id).eq('date', date); } catch {} }
     await setAttendance(req.params.id, date, type, nowHM(), true); await logActivity('admin', req.session.admin.id, type === 'checkIn' ? 'admin_check_in' : 'admin_check_out', req.params.id); res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: errText(e) }); }
@@ -632,26 +640,17 @@ async function workerAttendance(req, res, type) {
 app.post('/api/attendance/:id/check-in', requireAdmin, requirePerm('checkinout'), (req, res) => adminAttendance(req, res, 'checkIn'));
 app.post('/api/attendance/:id/check-out', requireAdmin, requirePerm('checkinout'), (req, res) => adminAttendance(req, res, 'checkOut'));
 app.post('/api/worker/check-in', requireWorker, (req, res) => workerAttendance(req, res, 'checkIn'));
-// Worker check-out sends the daily log to the admins together with the check-out.
-// The day is only counted as present once an admin approves the log.
+// Worker flow: 1) check-in  2) daily log  3) check-out.
+// Check-out is blocked until the daily log is submitted. The day is counted as present once an admin approves the log.
 app.post('/api/worker/check-out', requireWorker, async (req, res) => {
   try {
     const memberId = req.worker.id, date = ymd();
     const r = await getOneAttendance(memberId, date);
     if (!r?.check_in) return res.status(400).json({ error: 'Check in first' });
     if (r.check_out) return res.status(400).json({ error: 'Already checked out' });
-    const existing = await getTodayLog(memberId, date);
-    const approved = existing?.status === 'approved';
-    let log = existing;
-    if (!approved) {
-      const task = String(req.body?.task || '').trim() || existing?.task || '';
-      if (task.length < 3) return res.status(400).json({ error: 'Write your daily log before checking out' });
-      if (task.length > 1000) return res.status(400).json({ error: 'Daily log is too long (max 1000 characters)' });
-      const { data, error } = await db.from('daily_logs').upsert({ member_id: memberId, date, task, status: 'pending', reviewed_by: null, reviewed_at: null, updated_at: new Date().toISOString() }, { onConflict: 'member_id,date' }).select('*').single();
-      if (error) throw error;
-      log = data;
-      await logActivity('worker', memberId, 'daily_log_submitted', memberId, { date });
-    }
+    const log = await getTodayLog(memberId, date);
+    if (!log || !['pending', 'approved'].includes(log.status) || String(log.task || '').trim().length < 3) return res.status(400).json({ error: LOG_FIRST_MSG });
+    const approved = log.status === 'approved';
     await setAttendance(memberId, date, 'checkOut', nowHM(), approved);
     await logActivity('worker', memberId, 'worker_check_out', memberId);
     res.json({ ok: true, pendingApproval: !approved, log: publicLog(log) });
@@ -672,6 +671,7 @@ app.post('/api/attendance/:id/manual', requireWorker, async (req, res) => {
     if (type === 'checkOut') {
       if (!existing?.check_in) return res.status(400).json({ error: 'Check in first. Check-out is allowed only after check-in for that date' });
       if (time <= existing.check_in) return res.status(400).json({ error: 'Check-out time must be after the check-in time' });
+      if (!(await hasLogFor(m.id, date))) return res.status(400).json({ error: LOG_FIRST_MSG });
     }
     if (type === 'checkIn' && existing?.check_out && time >= existing.check_out) return res.status(400).json({ error: 'Check-in time must be before the existing check-out time' });
     await setAttendance(m.id, date, type, time);
